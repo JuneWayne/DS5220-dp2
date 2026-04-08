@@ -1,0 +1,25 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cville-weather
+spec:
+  schedule: "*/30 * * * *"     # runs every 30 minutes
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: cville-weather
+              image: ghcr.io/USERNAME/ds5220-cville-weather:latest   # <-- replace USERNAME
+              imagePullPolicy: Always
+              env:
+                - name: DYNAMODB_TABLE
+                  value: "cville-weather"
+                - name: S3_BUCKET
+                  value: "YOUR-BUCKET-NAME"                          # <-- replace
+                - name: AWS_REGION
+                  value: "us-east-1"
