@@ -8,8 +8,9 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import datetime, timezone
 from decimal import Decimal
+import seaborn as sns
 
-# --- Config ---
+# Configuration
 LOCATION = "Charlottesville, VA"
 LAT = 38.0293
 LON = -78.4767
@@ -17,13 +18,17 @@ TABLE_NAME = os.environ.get("DYNAMODB_TABLE", "cville-weather")
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
 REGION = os.environ.get("AWS_REGION", "us-east-1")
 
-# --- Clients ---
+# Clients 
 dynamodb = boto3.resource("dynamodb", region_name=REGION)
 table = dynamodb.Table(TABLE_NAME)
 s3 = boto3.client("s3", region_name=REGION)
 
 
 def fetch_weather():
+    """
+    Fetch current weather data for Charlottesville, VA from Open-Meteo API.
+    returns a dict with temperature (°F), wind speed (mph), precipitation (in), cloud cover (%), and API timestamp.
+    """
     url = (
         "https://api.open-meteo.com/v1/forecast"
         f"?latitude={LAT}&longitude={LON}"
@@ -47,6 +52,9 @@ def fetch_weather():
 
 
 def write_to_dynamo(record):
+    """
+    Write a weather record to DynamoDB. The partition key is the location, and the sort key is the timestamp.
+    """
     item = {
         "location": LOCATION,
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -61,6 +69,10 @@ def write_to_dynamo(record):
 
 
 def load_history():
+    """
+    Load all weather records for the location from DynamoDB, sorted by timestamp ascending.
+
+    """
     resp = table.query(
         KeyConditionExpression=boto3.dynamodb.conditions.Key("location").eq(LOCATION),
         ScanIndexForward=True,
@@ -69,43 +81,62 @@ def load_history():
 
 
 def generate_plot(history, out_path="/tmp/plot.png"):
-    timestamps = [datetime.strptime(r["timestamp"], "%Y-%m-%dT%H:%M:%SZ") for r in history]
+    # Convert timestamps to US eastern timezone for plotting
+    import zoneinfo
+    ET = zoneinfo.ZoneInfo("America/New_York")
+ 
+    timestamps = [
+        datetime.strptime(r["timestamp"], "%Y-%m-%dT%H:%M:%SZ")
+        .replace(tzinfo=timezone.utc)
+        .astimezone(ET)
+        for r in history
+    ]
     temps = [float(r["temperature_f"]) for r in history]
     winds = [float(r["wind_speed_mph"]) for r in history]
     clouds = [float(r["cloud_cover_pct"]) for r in history]
     precip = [float(r["precipitation_in"]) for r in history]
-
+ 
+    sns.set_theme(style="whitegrid")
     fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
-    fig.suptitle(f"Charlottesville, VA — Weather Tracker\n({len(history)} observations)", fontsize=14)
-
-    axes[0].plot(timestamps, temps, color="#e05c2e", linewidth=1.5)
-    axes[0].set_ylabel("Temp (°F)")
+    fig.suptitle(
+        f"Charlottesville, VA Weather Tracker\n({len(history)} observations)",
+        fontsize=14,
+        fontweight="bold"
+    )
+    # temperature 
+    sns.lineplot(x=timestamps, y=temps, ax=axes[0], color="#e05c2e", linewidth=1.5)
     axes[0].fill_between(timestamps, temps, alpha=0.15, color="#e05c2e")
-
-    axes[1].plot(timestamps, winds, color="#2e7de0", linewidth=1.5)
-    axes[1].set_ylabel("Wind (mph)")
+    axes[0].set_ylabel("Temperature (°F)")
+    
+    # wind speed
+    sns.lineplot(x=timestamps, y=winds, ax=axes[1], color="#2e7de0", linewidth=1.5)
     axes[1].fill_between(timestamps, winds, alpha=0.15, color="#2e7de0")
-
+    axes[1].set_ylabel("Wind Speed (mph)")
+    
+    # cloud cover
+    sns.lineplot(x=timestamps, y=clouds, ax=axes[2], color="#555555", linewidth=1)
     axes[2].fill_between(timestamps, clouds, alpha=0.4, color="#888888")
-    axes[2].plot(timestamps, clouds, color="#555555", linewidth=1)
     axes[2].set_ylabel("Cloud Cover (%)")
     axes[2].set_ylim(0, 100)
-
-    axes[3].bar(timestamps, precip, color="#4ab8c1", width=0.03)
-    axes[3].set_ylabel("Precip (in)")
-
+    
+    # precipitation (bar plot since precipitation is a sum of the hourly output, not instantenous)
+    sns.barplot(x=timestamps, y=precip, ax=axes[3], color="#4ab8c1", native_scale=True)
+    axes[3].set_ylabel("Precipitation (in)")
+ 
     for ax in axes:
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d %H:%M"))
-        ax.grid(True, alpha=0.3)
-
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d %H:%M", tz=ET))
+        ax.set_xlabel("")
+ 
     plt.xticks(rotation=30, ha="right")
     plt.tight_layout()
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"Plot saved to {out_path}")
 
-
 def generate_csv(history, out_path="/tmp/data.csv"):
+    """
+    Write all accumulated records to a CSV file for download
+    """
     with open(out_path, "w") as f:
         f.write("timestamp,temperature_f,wind_speed_mph,precipitation_in,cloud_cover_pct\n")
         for r in history:
@@ -120,16 +151,19 @@ def generate_csv(history, out_path="/tmp/data.csv"):
 
 
 def upload_to_s3(local_path, s3_key):
+    """ 
+    Upload a file to S3 with the correct content type based on the file extension.
+    """
     content_type = "image/png" if local_path.endswith(".png") else "text/csv"
     s3.upload_file(
         local_path, S3_BUCKET, s3_key,
-        ExtraArgs={"ContentType": content_type, "ACL": "public-read"},
+        ExtraArgs={"ContentType": content_type},
     )
     print(f"Uploaded {s3_key} to s3://{S3_BUCKET}")
 
 
 if __name__ == "__main__":
-    print(f"--- Cville Weather Tracker | {datetime.now(timezone.utc).isoformat()} ---")
+    print(f"--- Cville Weather Tracker at {datetime.now(timezone.utc).isoformat()} ---")
 
     weather = fetch_weather()
     item = write_to_dynamo(weather)
